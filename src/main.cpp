@@ -5,11 +5,13 @@
 
 #include "utils.h"
 #include "bigram_model.h"
+#include "nn_models.h"
 
 int main() {
   
     //visualizer("../data/names.txt", N);
-    bigram_model("../data/names.txt", 20);
+    //bigram_model("../data/names.txt", 20);
+    simple_neuron_model("../data/names.txt", 10);
 
     return 0;
 }

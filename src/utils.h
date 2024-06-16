@@ -37,10 +37,14 @@ inline std::vector<std::string> readLinesFromFile(const std::string& filename) {
 }
 
 // bigram tokenizer
-inline std::unordered_map<int, char> tokenizer(std::string data_path, torch::Tensor& bigram_tensor){
+inline void tokenizer(std::string data_path, 
+                      torch::Tensor& bigram_tensor,
+                      std::vector<std::string>& words, 
+                      std::unordered_map<int, char> &itos, 
+                      std::unordered_map<char, int> &stoi){
 
     // Read words from file
-    std::vector<std::string> words = readLinesFromFile(data_path);
+    words = readLinesFromFile(data_path);
 
     std::unordered_map<std::pair<char, char>, int, PairHash> b;
     std::set<char> unique_chars;
@@ -65,8 +69,6 @@ inline std::unordered_map<int, char> tokenizer(std::string data_path, torch::Ten
       return lhs.second > rhs.second;
     });
 
-    std::unordered_map<char, int> stoi;
-    std::unordered_map<int, char> itos;
     for (size_t i = 0; i < sorted_chars.size(); ++i) {
         stoi[sorted_chars[i]] = static_cast<int>(i) + 1;
         itos[static_cast<int>(i) + 1] = sorted_chars[i];
@@ -82,15 +84,17 @@ inline std::unordered_map<int, char> tokenizer(std::string data_path, torch::Ten
         bigram_tensor[idx1][idx2] += pair.second;
     }
 
-    return itos;
+    return;
 }
 
 // Bigram visualizer
 namespace plt = matplotlibcpp;
 inline void visualizer(std::string data_path, torch::Tensor& bigram_tensor){
 
+    std::vector<std::string> words;
     std::unordered_map<int, char> itos;
-    itos = tokenizer(data_path, bigram_tensor);
+    std::unordered_map<char, int> stoi;
+    tokenizer(data_path, bigram_tensor, words, itos, stoi);
     int rows = bigram_tensor.size(0);
     int cols = bigram_tensor.size(1);
 
