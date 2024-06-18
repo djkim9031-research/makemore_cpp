@@ -125,10 +125,12 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
     std::unordered_map<char, int> stoi;
     tokenizer(data_path, N, words, itos, stoi);
 
+    //________________________________________________________________________________
+    // Data preparation and create training data
+    //________________________________________________________________________________
 
     std::vector<int64_t> xs; // num_existing_char x context_win_size
     std::vector<int64_t> ys; // num_exisiting_char
-    words = {"matthew", "test", "hello"};
     for(const std::string& word : words){
         std::vector<int> context;
         for(size_t i=0; i<context_win_size; ++i){
@@ -153,8 +155,75 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
     auto xs_tensor = torch::from_blob(xs.data(), {static_cast<int>(ys.size()), context_win_size}, torch::kInt64).clone();
     auto ys_tensor = torch::tensor(ys, torch::kInt64);
 
-    std::cout<<xs_tensor<<std::endl;
-    std::cout<<ys_tensor<<std::endl;
+    // xs_tensor shape = [N , context_win_size]
+    // ys_tensor shape = [N]
 
+    //________________________________________________________________________________
+    // Training data embedding to a lower dimension space
+    //________________________________________________________________________________
+    auto gen = at::detail::createCPUGenerator(42);
+    auto xenc = torch::nn::functional::one_hot(xs_tensor, 27).to(torch::kFloat32); // shape = [N, context_win_size, 27]
+    auto C = torch::randn({27, 2}, gen).set_requires_grad(true); // Embedding space
+
+    // Randomly initialize weights and biases
+    auto W1 = torch::randn({2*context_win_size, 100}, gen).set_requires_grad(true);
+    auto b1 = torch::randn(100, gen).set_requires_grad(true);
+    auto W2 = torch::randn({100, 27}, gen).set_requires_grad(true);
+    auto b2 = torch::randn(27, gen).set_requires_grad(true);
+
+    std::vector<torch::Tensor*> params = {&C, &W1, &b1, &W2, &b2};
+
+    int iter = 0;
+    while(true){
+        auto emb = torch::matmul(xenc, C); // emb shape = [N, context_win_size, 2]
+        //auto emb_unbind = emb.unbind(1); // Unbind into a list of [N, 2] tensors, the list's length = context_win_size
+        //auto emb_flattened = torch::cat(emb_unbind, 1); // shape = [N, context_win_size x 2]
+        auto emb_flattened = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
+
+        //________________________________________________________________________________
+        // First layer
+        //________________________________________________________________________________
+
+        auto h = torch::tanh(torch::matmul(emb_flattened, W1) + b1); // shape [N, 100]
+
+        //________________________________________________________________________________
+        // Second layer
+        //________________________________________________________________________________
+
+        
+        auto logits = torch::matmul(h, W2) + b2;
+
+        //________________________________________________________________________________
+        // loss calculation
+        //________________________________________________________________________________
+
+        auto loss = torch::nn::functional::cross_entropy(logits, ys_tensor);
+
+        if(iter%10==0){
+            std::cout<<"[Iteration "<<iter<<", loss = "<<loss.item<float>()<<"]"<<std::endl;
+            std::cout<<"\n";
+            std::cout<<"________________________________________________________"<<std::endl;
+        }
+        iter += 1;
+        if(loss.item<float>() < 2.47){ //Roughly the nll loss of bigram
+            break;
+        }
+
+        // Backward pass
+        for(size_t i=0; i<params.size(); ++i){
+            if(params[i]->grad().defined()){
+                params[i]->grad().zero_();
+            }
+        }
+        loss.backward();
+
+        // Update parameters
+        for(size_t i=0; i<params.size(); ++i){
+            params[i]->data() -= 0.1*params[i]->grad();
+        }
+
+    }
+    
+   
     return;
 }
