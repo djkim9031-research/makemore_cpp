@@ -114,3 +114,47 @@ void simple_neuron_model(const std::string& data_path, int num_names){
     }
     return;
 }
+
+
+void simple_mlp_model(const std::string& data_path, const int context_win_size, int num_names){
+
+    auto N = torch::ones({27, 27}, torch::kInt32);
+
+    std::vector<std::string> words;
+    std::unordered_map<int, char> itos;
+    std::unordered_map<char, int> stoi;
+    tokenizer(data_path, N, words, itos, stoi);
+
+
+    std::vector<int64_t> xs; // num_existing_char x context_win_size
+    std::vector<int64_t> ys; // num_exisiting_char
+    words = {"matthew", "test", "hello"};
+    for(const std::string& word : words){
+        std::vector<int> context;
+        for(size_t i=0; i<context_win_size; ++i){
+            context.push_back(0);
+        }
+
+        std::string curr_name = word + ".";
+        for(char ch : curr_name){
+            int idx = stoi[ch];
+            xs.insert(xs.end(), context.begin(), context.end());
+            ys.push_back(idx);
+
+            for(int i=0; i<context_win_size - 1; ++i){
+                context[i] = context[i+1];
+            }
+            context[context_win_size - 1] = idx;
+
+        }
+    }
+
+    // Convert to torch tensors.
+    auto xs_tensor = torch::from_blob(xs.data(), {static_cast<int>(ys.size()), context_win_size}, torch::kInt64).clone();
+    auto ys_tensor = torch::tensor(ys, torch::kInt64);
+
+    std::cout<<xs_tensor<<std::endl;
+    std::cout<<ys_tensor<<std::endl;
+
+    return;
+}
