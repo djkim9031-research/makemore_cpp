@@ -10,7 +10,7 @@
 int main() {
   
     //visualizer("../data/names.txt", N);
-    //bigram_model("../data/names.txt", 20);
+    //bigram_model("../data/names.txt", 10);
     //simple_neuron_model("../data/names.txt", 10);
     simple_mlp_model("../data/names.txt", 5, 10);
 

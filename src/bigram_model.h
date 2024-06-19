@@ -65,7 +65,7 @@ inline void bigram_model(std::string data_path, int num_names){
       curr_name+=itos[idx];
     }
 
-    //std::cout<<curr_name<<std::endl;
+    std::cout<<"[Inference - Bigram model] Generated name(s): "<<curr_name<<std::endl;
   }
 
   return;
