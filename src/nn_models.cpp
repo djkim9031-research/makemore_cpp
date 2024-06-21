@@ -57,11 +57,14 @@ namespace{
                 auto xenc = torch::nn::functional::one_hot(xs_tensor, 27).to(torch::kFloat32);
 
                 // 1st param of the trained_params in mapper to the embedding space
-                // and 2*n = weights, 2*n + 1 = biases.
+                // and 2*n = weights, 2*n + 1 = biases, 2*n + 2 = bn_gain, 2*n + 3 = bn_biases
                 auto emb = torch::matmul(xenc, *trained_params[0]); 
                 auto out = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
-                for(size_t i=1; i<trained_params.size()-2; i+=2){
-                    out = torch::tanh(torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]));
+                for(size_t i=1; i<trained_params.size()-2; i+=4){
+                    auto pre_act = torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]);
+                    // Batch norm
+                    //auto pre_act = (*trained_params[i+2])*out + (*trained_params[i+3]);
+                    out = torch::tanh(pre_act);
                 }
                 auto logits = torch::matmul(out, *trained_params[trained_params.size()-2]) + (*trained_params[trained_params.size()-1]);
                 auto counts = logits.exp();  // num_names, 27
@@ -119,11 +122,14 @@ namespace{
         auto xenc = torch::nn::functional::one_hot(validation_data, 27).to(torch::kFloat32);
 
         // 1st param of the trained_params in mapper to the embedding space
-        // and 2*n = weights, 2*n + 1 = biases.
+        // and 2*n = weights, 2*n + 1 = biases, 2*n + 2 = bn_gain, 2*n + 3 = bn_biases.
         auto emb = torch::matmul(xenc, *trained_params[0]); 
         auto out = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
-        for(size_t i=1; i<trained_params.size()-2; i+=2){
-            out = torch::tanh(torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]));
+        for(size_t i=1; i<trained_params.size()-2; i+=4){
+            auto pre_act = torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]);
+            // Batch norm
+            //auto pre_act = (*trained_params[i+2])*out + (*trained_params[i+3]);
+            out = torch::tanh(pre_act);
         }
         auto logits = torch::matmul(out, *trained_params[trained_params.size()-2]) + (*trained_params[trained_params.size()-1]);
         auto loss = torch::nn::functional::cross_entropy(logits, validation_target);
@@ -254,16 +260,34 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
     // Training data embedding to a lower dimension space
     //________________________________________________________________________________
     auto gen = at::detail::createCPUGenerator(42);
-    int embedding_space_dim = 2;
-    auto C = torch::randn({27, embedding_space_dim}, gen).set_requires_grad(true); // Embedding space
+    int embedding_space_dim = 10;
+    int vocab_size = 27;
+    int n_hidden = 200;
+    auto C = torch::randn({vocab_size, embedding_space_dim}, gen).set_requires_grad(true); // Embedding space
 
     // Randomly initialize weights and biases
-    auto W1 = torch::randn({embedding_space_dim*context_win_size, 100}, gen).set_requires_grad(true);
-    auto b1 = torch::randn(100, gen).set_requires_grad(true);
-    auto W2 = torch::randn({100, 27}, gen).set_requires_grad(true);
-    auto b2 = torch::randn(27, gen).set_requires_grad(true);
+    auto W1 = torch::randn({embedding_space_dim*context_win_size, n_hidden}, gen);
+    auto b1 = torch::randn(n_hidden, gen);
+    auto W2 = torch::randn({n_hidden, vocab_size}, gen);
+    auto b2 = torch::randn(vocab_size, gen);
 
-    std::vector<torch::Tensor*> params = {&C, &W1, &b1, &W2, &b2};
+    // Kaiming initialization
+    // For tanh nonlinearity, gain = 5/3. And for linearity, gain = 1 => then divide by sqrt(fan_in)
+    W1 = W1 * ((5.0 / 3.0) / std::sqrt(static_cast<float>(embedding_space_dim) * static_cast<float>(context_win_size)));
+    b1 = b1 * ((5.0 / 3.0) / std::sqrt(static_cast<float>(n_hidden)));
+    W2 = W2 * (1.0 / std::sqrt(static_cast<float>(n_hidden)));
+    b2 = b2 * (1.0 / std::sqrt(static_cast<float>(vocab_size)));
+
+    W1.set_requires_grad(true);
+    b1.set_requires_grad(true);
+    W2.set_requires_grad(true);
+    b2.set_requires_grad(true);
+
+    // Batch normalization gain and bias
+    auto bn_gain = torch::ones({1, n_hidden}).set_requires_grad(true);
+    auto bn_bias = torch::zeros({1, n_hidden}).set_requires_grad(true);
+
+    std::vector<torch::Tensor*> params = {&C, &W1, &b1, &bn_gain, &bn_bias, &W2, &b2};
 
     // Prior to training, generated name:
     std::cout<<"Generated name(s) prior to training: ";
@@ -282,10 +306,10 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
     auto lrs = torch::pow(10, lre);// 10^-3 ~ 1, exponenetially spaced
     while(true){
         // Mini batch
-        auto idx = torch::randint(0, xs_tensor.size(0), {32}, torch::kInt64); // batch size = 32
+        auto idx = torch::randint(0, xs_tensor.size(0), {batch_size}, torch::kInt64); // batch size = 32
         auto xs_tensor_batch = xs_tensor.index_select(0, idx);
         auto ys_tensor_batch = ys_tensor.index_select(0, idx);
-        auto xenc = torch::nn::functional::one_hot(xs_tensor_batch, 27).to(torch::kFloat32); // shape = [batch size, context_win_size, 27]
+        auto xenc = torch::nn::functional::one_hot(xs_tensor_batch, vocab_size).to(torch::kFloat32); // shape = [batch size, context_win_size, 27]
 
         auto emb = torch::matmul(xenc, C); // emb shape = [N, context_win_size, 2]
         //auto emb_unbind = emb.unbind(1); // Unbind into a list of [N, 2] tensors, the list's length = context_win_size
@@ -296,14 +320,21 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
         // First layer
         //________________________________________________________________________________
 
-        auto h = torch::tanh(torch::matmul(emb_flattened, W1) + b1); // shape [N, 100]
+        auto h = torch::matmul(emb_flattened, W1) + b1;
+        
+        // Batch norm
+        auto mean = h.mean(0, /*keepdim=*/true);
+        auto std = h.std(0, /*unbiased=*/false, /*keepdim=*/true);
+        auto pre_act = (bn_gain*(h - mean) / (std+ 1e-5) ) + (bn_bias);
+
+        auto h_act = torch::tanh(pre_act); 
 
         //________________________________________________________________________________
         // Second layer
         //________________________________________________________________________________
 
         
-        auto logits = torch::matmul(h, W2) + b2;
+        auto logits = torch::matmul(h_act, W2) + b2;
 
         //________________________________________________________________________________
         // loss calculation
@@ -311,7 +342,7 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
 
         auto loss = torch::nn::functional::cross_entropy(logits, ys_tensor_batch);
 
-        if(iter%10==0){
+        if(iter%10000==0){
             iter_10s += 1;
             std::cout<<"[Iteration "<<iter<<", Training loss = "<<loss.item<float>()<<"]"<<std::endl;
             std::cout<<"[Evaluation loss = "<<evaluation(xval_tensor, yval_tensor, context_win_size, params)<<"]"<<std::endl;
@@ -325,7 +356,7 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
             std::cout<<"________________________________________________________"<<std::endl;
         }
         iter += 1;
-        if(iter>10000){
+        if(iter>200000){
             break;
         }
 
@@ -340,13 +371,14 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
         // Update parameters
         //int lr_idx = (iter_10s < num_spacings) ? num_spacings - 1- iter_10s : 0;
         //float lr = lrs[lr_idx].item<float>();
+        float lr = (iter > 100000) ? 0.01 : 0.1;
         for(size_t i=0; i<params.size(); ++i){
-            params[i]->data() -= 0.1*params[i]->grad();
+            params[i]->data() -= lr*params[i]->grad();
         }
 
     }
 
-    embedding_space_visualizer(C, itos);
+    //embedding_space_visualizer(C, itos);
     
    
     return;
