@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <set>
+#include <cassert>
 
 #include <torch/torch.h>
 #include <matplotlibcpp.h>
@@ -113,4 +114,25 @@ inline void visualizer(std::string data_path, torch::Tensor& bigram_tensor){
     plt::save("bigram_plot.png");
 
     return;
+}
+
+inline void embedding_space_visualizer(const torch::Tensor& embedding, const std::unordered_map<int, char>& itos){
+
+    assert(embedding.size(1) == 2); // Only able to visualize 2-dim, hence 2-dim embedding space is supported.
+    plt::figure_size(1600, 1600);
+
+    std::vector<float> x(embedding.size(0));
+    std::vector<float> y(embedding.size(0));
+    for (int i = 0; i < embedding.size(0); ++i) {
+        x[i] = embedding[i][0].item<float>();
+        y[i] = embedding[i][1].item<float>();
+    }
+    plt::scatter(x, y, 200);
+    for (int i = 0; i < embedding.size(0); ++i) {
+        plt::text(x[i], y[i], std::string(1, itos.at(i)));
+    }
+
+    plt::grid(true);
+    plt::save("embedding_space_plot.png");
+
 }

@@ -32,15 +32,15 @@ namespace{
         return generated_names;
     }
 
-    std::vector<std::string> nn_name_inference(std::unordered_map<char, int>& stoi,
-                                               std::unordered_map<int, char>& itos,
+    std::vector<std::string> nn_name_inference(const std::unordered_map<char, int>& stoi,
+                                               const std::unordered_map<int, char>& itos,
                                                const int num_names,
                                                const int context_win_size,
-                                               const std::vector<torch::Tensor*>& trained_params){
+                                               const std::vector<torch::Tensor*>& trained_params,
+                                               const torch::Generator& gen){
 
 
         std::vector<std::string> generated_names;
-        auto gen = at::detail::createCPUGenerator(42);
         for(int n=0; n<num_names; ++n){
             std::string name = "";
             char curr_char = '.';
@@ -52,7 +52,7 @@ namespace{
                 auto temp_tensor = xs_tensor.slice(1, 1, context_win_size).clone();
                 xs_tensor.slice(1, 0, context_win_size-1) = temp_tensor;
                 // Set the last element to the new value.
-                xs_tensor[0][context_win_size-1] = stoi[curr_char];
+                xs_tensor[0][context_win_size-1] = stoi.at(curr_char);
 
                 auto xenc = torch::nn::functional::one_hot(xs_tensor, 27).to(torch::kFloat32);
 
@@ -68,12 +68,12 @@ namespace{
                 auto probs = counts / counts.sum(1, true);
 
                 idx = torch::multinomial(probs, /*num_samples=*/1, /*replacement=*/true, gen).item<int>();
-                curr_char = itos[idx];
-                curr_char = itos[idx];
+                curr_char = itos.at(idx);
+                curr_char = itos.at(idx);
                 if(idx == 0){
                     break;
                 }
-                name += itos[idx];
+                name += itos.at(idx);
             }
             generated_names.push_back(name);
         }
@@ -254,10 +254,11 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
     // Training data embedding to a lower dimension space
     //________________________________________________________________________________
     auto gen = at::detail::createCPUGenerator(42);
-    auto C = torch::randn({27, 2}, gen).set_requires_grad(true); // Embedding space
+    int embedding_space_dim = 2;
+    auto C = torch::randn({27, embedding_space_dim}, gen).set_requires_grad(true); // Embedding space
 
     // Randomly initialize weights and biases
-    auto W1 = torch::randn({2*context_win_size, 100}, gen).set_requires_grad(true);
+    auto W1 = torch::randn({embedding_space_dim*context_win_size, 100}, gen).set_requires_grad(true);
     auto b1 = torch::randn(100, gen).set_requires_grad(true);
     auto W2 = torch::randn({100, 27}, gen).set_requires_grad(true);
     auto b2 = torch::randn(27, gen).set_requires_grad(true);
@@ -266,7 +267,7 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
 
     // Prior to training, generated name:
     std::cout<<"Generated name(s) prior to training: ";
-    std::vector<std::string> gen_names = nn_name_inference(stoi, itos, num_names, context_win_size, params);
+    std::vector<std::string> gen_names = nn_name_inference(stoi, itos, num_names, context_win_size, params, gen);
     for(int n=0; n<num_names; ++n){
         std::cout<<gen_names[n]<<"   ";
     }
@@ -316,7 +317,7 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
             std::cout<<"[Evaluation loss = "<<evaluation(xval_tensor, yval_tensor, context_win_size, params)<<"]"<<std::endl;
             std::cout<<"[Inference - simple mlp] Generated name(s): ";
             gen_names.clear();
-            gen_names = nn_name_inference(stoi, itos, num_names, context_win_size, params);
+            gen_names = nn_name_inference(stoi, itos, num_names, context_win_size, params, gen);
             for(int n=0; n<num_names; ++n){
                 std::cout<<gen_names[n]<<"   ";
             }
@@ -324,7 +325,7 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
             std::cout<<"________________________________________________________"<<std::endl;
         }
         iter += 1;
-        if(iter>1000){
+        if(iter>10000){
             break;
         }
 
@@ -344,6 +345,8 @@ void simple_mlp_model(const std::string& data_path, const int context_win_size, 
         }
 
     }
+
+    embedding_space_visualizer(C, itos);
     
    
     return;
