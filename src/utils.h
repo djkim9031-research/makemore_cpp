@@ -7,9 +7,12 @@
 #include <unordered_map>
 #include <set>
 #include <cassert>
+#include <map>
 
 #include <torch/torch.h>
 #include <matplotlibcpp.h>
+
+#include "nn_layers.h"
 
 // Custom hash function for std::pair<char, char>
 struct PairHash {
@@ -90,7 +93,7 @@ inline void tokenizer(std::string data_path,
 
 // Bigram visualizer
 namespace plt = matplotlibcpp;
-inline void visualizer(std::string data_path, torch::Tensor& bigram_tensor){
+inline void viz_bigram(std::string data_path, torch::Tensor& bigram_tensor){
 
     std::vector<std::string> words;
     std::unordered_map<int, char> itos;
@@ -116,8 +119,7 @@ inline void visualizer(std::string data_path, torch::Tensor& bigram_tensor){
     return;
 }
 
-inline void embedding_space_visualizer(const torch::Tensor& embedding, const std::unordered_map<int, char>& itos){
-
+inline void viz_embedding_space(const torch::Tensor& embedding, const std::unordered_map<int, char>& itos){
     assert(embedding.size(1) == 2); // Only able to visualize 2-dim, hence 2-dim embedding space is supported.
     plt::figure_size(1600, 1600);
 
@@ -135,4 +137,34 @@ inline void embedding_space_visualizer(const torch::Tensor& embedding, const std
     plt::grid(true);
     plt::save("embedding_space_plot.png");
 
+}
+
+inline void viz_tanh_activation_dist(const std::vector<std::unique_ptr<Layer>>& layers) {
+    plt::figure_size(2000, 400);
+
+    for (size_t i = 0; i < layers.size() - 1; ++i) { // Exclude the output layer
+        if(layers[i]->name().find("tanh") != std::string::npos){
+            auto tanh_layer = dynamic_cast<TanhActivation*>(layers[i].get());
+            if(tanh_layer){
+                torch::Tensor t = tanh_layer->output;
+                float mean = t.mean().item<float>();
+                float std = t.std().item<float>();
+                float saturated = (t.abs() > 0.97).to(torch::kFloat32).mean().item<float>() * 100;
+
+                std::cout << "layer " << i << " (" << tanh_layer->name() << "): mean " << mean << ", std " << std
+                          << ", saturated: " << saturated << "%" << std::endl;
+
+                auto hist = torch::histc(t, /*bins=*/100);
+                auto edges = torch::linspace(-1, 1, 101); // 100 bins have 101 edges
+                std::vector<float> hy(hist.data_ptr<float>(), hist.data_ptr<float>() + hist.numel());
+                std::vector<float> hx(edges.data_ptr<float>(), edges.data_ptr<float>() + edges.numel() - 1);
+
+                plt::plot(hx, hy, {{"label", "layer " + std::to_string(i) + " (" + tanh_layer->name() + ")"}});
+            }
+        }
+    }
+
+    plt::legend();
+    plt::title("activation distribution");
+    plt::save("tanh_activation.png");
 }
