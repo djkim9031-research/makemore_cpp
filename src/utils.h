@@ -119,6 +119,8 @@ inline void viz_bigram(std::string data_path, torch::Tensor& bigram_tensor){
     return;
 }
 
+// Visualizer to see what embedding space has learned.
+// Only accepts 2D embedding space.
 inline void viz_embedding_space(const torch::Tensor& embedding, const std::unordered_map<int, char>& itos){
     assert(embedding.size(1) == 2); // Only able to visualize 2-dim, hence 2-dim embedding space is supported.
     plt::figure_size(1600, 1600);
@@ -139,6 +141,9 @@ inline void viz_embedding_space(const torch::Tensor& embedding, const std::unord
 
 }
 
+// Visualizer helper function to see the tanh layer's output distribution.
+// This is to check if the initialization of weights are valid, and not leading to value
+// saturation by the nonlinearity function, i.e., tanh.
 inline void viz_tanh_activation_dist(const std::vector<std::unique_ptr<Layer>>& layers) {
     plt::figure_size(2000, 400);
 
@@ -167,4 +172,21 @@ inline void viz_tanh_activation_dist(const std::vector<std::unique_ptr<Layer>>& 
     plt::legend();
     plt::title("activation distribution");
     plt::save("tanh_activation.png");
+}
+
+
+// Compare the implemented gradients to the Torch gradients.
+inline void cmp(const std::string& s, const torch::Tensor& dt, const torch::Tensor &t){
+    // Check for exact equality
+    bool exact = torch::all(dt == t.grad()).item<bool>();
+
+    // Check for approximate equality
+    bool approximate = torch::allclose(dt, t.grad());
+
+    // Calculate the maximum difference
+    float maxdiff = (dt - t.grad()).abs().max().item<float>();
+
+
+    std::cout << std::setw(15) << s << " | exact: " << std::boolalpha << exact
+              << " | approximate: " << approximate << " | maxdiff: " << maxdiff << std::endl;
 }

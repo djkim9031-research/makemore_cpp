@@ -281,15 +281,15 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     //________________________________________________________________________________
     auto embedding = std::make_unique<Linear>(vocab_size, embedding_space_dim, "embedding", gen, false);
     auto ln1 = std::make_unique<Linear>(context_win_size*embedding_space_dim, n_hidden, "dense1", gen, false);
-    auto bn1 = std::make_unique<BatchNorm1D>(n_hidden, "batch_norm1", 0.01);
+    auto bn1 = std::make_unique<BatchNorm1D>(n_hidden, "batch_norm1", 0.1);
     auto tanh1 = std::make_unique<TanhActivation>("tanh1");
 
     auto ln2 = std::make_unique<Linear>(n_hidden, 2*n_hidden, "dense2", gen, false);
-    auto bn2 = std::make_unique<BatchNorm1D>(2*n_hidden, "batch_norm2", 0.01);
+    auto bn2 = std::make_unique<BatchNorm1D>(2*n_hidden, "batch_norm2", 0.1);
     auto tanh2 = std::make_unique<TanhActivation>("tanh2");
 
     auto ln3 = std::make_unique<Linear>(2*n_hidden, n_hidden, "dense3", gen, false);
-    auto bn3 = std::make_unique<BatchNorm1D>(n_hidden, "batch_norm3", 0.01);
+    auto bn3 = std::make_unique<BatchNorm1D>(n_hidden, "batch_norm3", 0.1);
     auto tanh3 = std::make_unique<TanhActivation>("tanh3");
 
     auto ln4 = std::make_unique<Linear>(n_hidden, vocab_size, "dense4", gen, true);
@@ -391,4 +391,206 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     // will be 0.
     // Without proper initialization or batch normalization, saturation will be more pronounced.
     viz_tanh_activation_dist(mlp_layers); 
+}
+
+
+void mlp_model_with_custom_backprop(const std::string& data_path, const int context_win_size, int num_names, int batch_size){
+
+    auto gen = at::detail::createCPUGenerator(42);
+    int embedding_space_dim = 10;
+    int vocab_size = 27;
+    int n_hidden = 200;
+
+    auto N = torch::ones({vocab_size, vocab_size}, torch::kInt32);
+
+    std::vector<std::string> words;
+    std::unordered_map<int, char> itos;
+    std::unordered_map<char, int> stoi;
+    tokenizer(data_path, N, words, itos, stoi);
+
+    //________________________________________________________________________________
+    // Data preparation and create training data
+    //________________________________________________________________________________
+    // Seed the random number generator
+    std::mt19937 rng(42); // 42 is the seed value
+
+    // Shuffle the words
+    std::shuffle(words.begin(), words.end(), rng);
+
+    // Calculate n1 and n2
+    int n1 = static_cast<int>(0.8 * words.size());
+    int n2 = static_cast<int>(0.9 * words.size());
+
+    std::vector<std::string> training_data(words.begin(), words.begin() + n1);
+    std::vector<std::string> validation_data(words.begin() + n1, words.begin() + n2);
+    std::vector<std::string> test_data(words.begin() + n2, words.end());
+
+    torch::Tensor xs_tensor, ys_tensor, xval_tensor, yval_tensor, xtest_tensor, ytest_tensor;
+
+    build_dataset(context_win_size, stoi, training_data, xs_tensor, ys_tensor);
+    build_dataset(context_win_size, stoi, validation_data, xval_tensor, yval_tensor);
+    build_dataset(context_win_size, stoi, test_data, xtest_tensor, ytest_tensor);
+
+    //________________________________________________________________________________
+    // Definition of trainable parameters
+    //________________________________________________________________________________
+
+    auto C = torch::randn({vocab_size, embedding_space_dim}, gen);
+    auto W1 = torch::randn({embedding_space_dim*context_win_size, n_hidden}, gen)*5/(3*std::sqrt(embedding_space_dim*context_win_size));
+    auto b1 = torch::randn(n_hidden, gen)*0.1;
+    auto W2 = torch::randn({n_hidden, vocab_size}, gen)*0.1;
+    auto b2 = torch::randn(vocab_size, gen)*0.1;
+
+    auto bn_gain = torch::randn({1, n_hidden})*0.1 + 1.0;
+    auto bn_bias = torch::rand({1, n_hidden})*0.1;
+
+    std::vector<torch::Tensor*> params = {&C, &W1, &b1, &bn_gain, &bn_bias, &W2, &b2};
+    for(torch::Tensor* param : params){
+        param->set_requires_grad(true);
+    }
+
+
+    //________________________________________________________________________________
+    // Batch selection
+    //________________________________________________________________________________
+
+    auto idx = torch::randint(0, xs_tensor.size(0), {batch_size}, torch::kInt64);
+    auto xs_tensor_batch = xs_tensor.index_select(0, idx);
+    auto ys_tensor_batch = ys_tensor.index_select(0, idx);
+
+    //________________________________________________________________________________
+    // Layers
+    //________________________________________________________________________________
+
+    auto xenc = torch::nn::functional::one_hot(xs_tensor_batch, vocab_size).to(torch::kFloat32);
+    auto emb = torch::matmul(xenc, C);
+    auto emb_flattened = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
+
+    // Linear layer 1
+    auto h_prebn = torch::matmul(emb_flattened, W1) + b1; // batch, n_hidden
+
+    // Batchnorm layer
+    auto bn_meani = h_prebn.sum(0, true)/batch_size;    // 1, n_hidden
+    auto bn_diff = h_prebn - bn_meani;   // batch_size, n_hidden
+    auto bn_diff2 = torch::pow(bn_diff, 2); // batch_size, n_hidden
+    auto bn_var = bn_diff2.sum(0, true)/(batch_size -1); // 1, n_hidden
+    auto bn_var_inv = torch::pow(bn_var + 1e-5, -0.5); // 1, n_hidden
+    auto bn_raw = bn_diff*bn_var_inv; // batch_size, n_hidden
+    auto h_preact = bn_gain*bn_raw + bn_bias; //batch_size, n_hidden
+
+    // Non-linearity
+    auto h = torch::tanh(h_preact); // batch_size, n_hidden
+
+    // Linear layer 2
+    auto logits = torch::matmul(h, W2) + b2; // batch_size, vocab_size
+
+    // Cross entropy loss
+    auto logit_maxes = std::get<0>(logits.max(1, true)); // logit.max returns a tuple where 1st elem = max val, 2nd = corr indices
+    auto norm_logits = logits - logit_maxes; // Subtract max for numerical stability // bat, vocab
+    auto counts = norm_logits.exp(); // batch_size, vocab_size
+    auto counts_sum = counts.sum(1, true); // batch_size, 1
+    auto counts_sum_inv = torch::pow(counts_sum, -1); // batch_size, 1
+    auto probs = counts * counts_sum_inv; // batch_size, vocab_size
+    auto log_probs = probs.log(); // batch_size, vocab_size
+
+    auto range_tensor = torch::arange(batch_size, torch::kInt64);
+    auto logprobs_selected = log_probs.index({range_tensor, ys_tensor_batch}); // batch_size, 1
+    auto loss = -logprobs_selected.mean();
+
+    for(torch::Tensor* param : params){
+        if(param->grad().defined()){
+            param->grad().zero_();
+        }
+    }
+    std::vector<torch::Tensor*> ts = {&log_probs, &probs, &counts, &counts_sum, &counts_sum_inv, &norm_logits, &logit_maxes,
+                                     &logits, &h, &h_preact, &bn_raw, &bn_var_inv, &bn_var, &bn_diff2, &bn_diff, &bn_meani,
+                                     &h_prebn, &emb_flattened, &emb};
+    for(auto& t : ts){
+        t->set_requires_grad(true);
+        t->retain_grad();
+    }
+
+    loss.backward();
+
+    //________________________________________________________________________________
+    // Backprop calculation
+    //________________________________________________________________________________
+    auto d_log_probs = torch::zeros_like(log_probs);
+    d_log_probs.index_put_({range_tensor, ys_tensor_batch}, torch::tensor({-1.0/batch_size})); // derivative of mean = 1/batch_size
+
+    //log_probs = ln(probs) => dL/d_probs = d_term_so_far * 1/probs
+    auto d_probs = (1.0/probs) * d_log_probs; // derivate of ln(x) = 1/x
+
+    auto d_counts_sum_inv = (counts * d_probs).sum(1, true);
+    auto d_counts = counts_sum_inv * d_probs;
+    // counts_sum_inv = 1/counts_sum => derivative of counts_sum = -1/(counts_sum)^2
+    auto d_counts_sum = -torch::pow(counts_sum, -2) * d_counts_sum_inv;
+    d_counts += torch::ones_like(counts) * d_counts_sum;
+
+    // (e^x)' = (e^x) = y
+    auto d_norm_logits = counts * d_counts;
+
+    auto d_logit_maxes = (-d_norm_logits).sum(1, true);
+    auto d_logits = d_norm_logits.clone();
+    // Max elements are backpropagated from d_logit_maxes, and rest are directly from d_norm_logits
+    d_logits += torch::nn::functional::one_hot(std::get<1>(logits.max(1)), vocab_size).to(torch::kFloat32) * d_logit_maxes;
+
+    auto d_h = torch::matmul(d_logits, W2.transpose(0, 1)); //(batch_size, n_hidden) = (batch_size, vocab_size)*(n_hidden, vocab_size).T
+    auto d_W2 = torch::matmul(h.transpose(0, 1), d_logits);
+    auto d_b2 = d_logits.sum(0);
+
+    auto d_h_preact = (1.0 - torch::pow(h, 2))*d_h;
+    auto d_bn_gain = (bn_raw * d_h_preact).sum(0, true); //(1, n_hidden) = sum_over_dim_0{(batch_size, n_hidden)*(batch_size, n_hidden)}
+    auto d_bn_raw = bn_gain * d_h_preact;
+    auto d_bn_bias = d_h_preact.sum(0, true);
+    auto d_bn_diff = bn_var_inv * d_bn_raw;
+    auto d_bn_var_inv = (bn_diff * d_bn_raw).sum(0, true);
+    auto d_bn_var = -0.5*(torch::pow(bn_var + 1e-5, -1.5))*d_bn_var_inv; // d(1/x^0.5) => -0.5*(1/x^1.5)
+    auto d_bn_diff2 = (1.0/(batch_size - 1))*torch::ones_like(bn_diff2)*d_bn_var;
+    d_bn_diff += (2*bn_diff)*d_bn_diff2;
+    auto d_bn_meani = -d_bn_diff.sum(0, true);
+
+    auto d_h_prebn = d_bn_diff.clone();
+    d_h_prebn += (1.0/batch_size)*(torch::ones_like(h_prebn) * d_bn_meani);
+
+    auto d_emb_flattened = torch::matmul(d_h_prebn, W1.transpose(0, 1));
+    auto d_W1 = torch::matmul(emb_flattened.transpose(0, 1), d_h_prebn);
+    auto d_b1 = d_h_prebn.sum(0);
+    auto d_emb = d_emb_flattened.view({emb.sizes()});
+    
+    auto d_C = torch::matmul(xenc.transpose(1, 2), d_emb).sum(0); // (vocab_size, embedding_space_dim) = sum_over_dim_0{(batch, conteext, vocab).T  * (batch, context, emb)}
+    
+
+    //________________________________________________________________________________
+    // Sanity check - validatate the manually implemented backprob results with torch results
+    //________________________________________________________________________________
+    
+    cmp("log_probs", d_log_probs, log_probs);
+    cmp("probs", d_probs, probs);
+    cmp("counts_sum_inv", d_counts_sum_inv, counts_sum_inv);
+    cmp("counts_sum", d_counts_sum, counts_sum);
+    cmp("counts", d_counts, counts);
+    cmp("norm_logits", d_norm_logits, norm_logits);
+    cmp("logit_maxes", d_logit_maxes, logit_maxes);
+    cmp("logits", d_logits, logits);
+    cmp("h", d_h, h);
+    cmp("W2", d_W2, W2);
+    cmp("b2", d_b2, b2);
+    cmp("h_preact", d_h_preact, h_preact);
+    cmp("bn_gain", d_bn_gain, bn_gain);
+    cmp("bn_bias", d_bn_bias, bn_bias);
+    cmp("bn_raw", d_bn_raw, bn_raw);
+    cmp("bn_var_inv", d_bn_var_inv, bn_var_inv);
+    cmp("bn_var", d_bn_var, bn_var);
+    cmp("bn_diff2", d_bn_diff2, bn_diff2);
+    cmp("bn_diff", d_bn_diff, bn_diff);
+    cmp("bn_meani", d_bn_meani, bn_meani);
+    cmp("h_prebn", d_h_prebn, h_prebn);
+    cmp("emb_flattened", d_emb_flattened, emb_flattened);
+    cmp("W1", d_W1, W1);
+    cmp("b1", d_b1, b1);
+    cmp("emb", d_emb, emb);
+    cmp("C", d_C, C);
+
+
 }

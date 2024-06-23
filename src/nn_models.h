@@ -28,3 +28,7 @@ void simple_neuron_model(const std::string& data_path, int num_names);
 // @param num_names             Number of names to generate at the inference time.
 // @param batch_size            Size of the batch to be consumed at the training time.
 void mlp_model(const std::string& data_path, const int context_win_size, int num_names, int batch_size=64);
+
+
+// Backprop from scratch
+void mlp_model_with_custom_backprop(const std::string& data_path, const int context_win_size, int num_names, int batch_size=64);
