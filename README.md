@@ -1,7 +1,7 @@
 # makemore_cpp
 c++ implementation of makemore.
 
-Given the name.txt, the repo implements the neural network logic from scratch to generate names that sounds plausible.
+Given the name.txt, the repo implements the neural network logic from scratch to generate names that sound plausible.
 C++ LibTorch and Matplotlib-cpp are used.
 Implemented models are:
 1. Bigram model distribution model.
