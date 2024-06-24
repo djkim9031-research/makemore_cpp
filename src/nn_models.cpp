@@ -142,7 +142,7 @@ namespace{
             auto pre_act = torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]);
 
             auto bn_mean = pre_act.mean(0, /*keepdim=*/true);
-            auto bn_std = pre_act.std(0, /*unbiased=*/false, /*keepdim=*/true);
+            auto bn_std = pre_act.std(0, /*unbiased=*/true, /*keepdim=*/true);
 
             bn_params.push_back(bn_mean);
             bn_params.push_back(bn_std);
@@ -394,7 +394,7 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
 }
 
 
-void mlp_model_with_custom_backprop(const std::string& data_path, const int context_win_size, int num_names, int batch_size){
+void custom_backprop_test(const std::string& data_path, const int context_win_size, int num_names, int batch_size){
 
     auto gen = at::detail::createCPUGenerator(42);
     int embedding_space_dim = 10;
@@ -510,7 +510,7 @@ void mlp_model_with_custom_backprop(const std::string& data_path, const int cont
         t->retain_grad();
     }
 
-    loss.backward();
+    loss.backward({},/* retain_graph= */ true);
 
     //________________________________________________________________________________
     // Backprop calculation
@@ -592,5 +592,78 @@ void mlp_model_with_custom_backprop(const std::string& data_path, const int cont
     cmp("emb", d_emb, emb);
     cmp("C", d_C, C);
 
+
+    //________________________________________________________________________________
+    // Optimizing loss function with softmax
+    //________________________________________________________________________________
+    // Cross entropy loss (optimized)
+    auto ce_loss = torch::nn::functional::cross_entropy(logits, ys_tensor_batch);
+    std::cout<<"Diff between cross entropy loss (torch) and manually calculated: "<<(ce_loss - loss).item<float>()<<std::endl;
+    
+    // Cross entropy = -1 * (1*ln(softmax_result_for_exp1) + 1*ln(softmax_result_for_exp2) + ...)/(batch_size)
+    // dL/d(softmax) = -(1/softmax)/batch_size
+    // d(softmax)/d(logits) = softmax * (1 - softmax)
+    // dL/d(logits) = -(1-softmax)/batch_size 
+
+    auto d_logits_optimized = torch::zeros_like(logits);
+    d_logits_optimized.index_put_({range_tensor, ys_tensor_batch}, torch::tensor({-1.0/batch_size})); 
+    d_logits_optimized += torch::nn::functional::softmax(logits, /*dim=*/1)/batch_size;
+
+    d_logits_optimized.set_requires_grad(true);
+    d_logits_optimized.retain_grad();
+
+    cmp("logits_optimized", d_logits_optimized, logits);
+
+
+    //________________________________________________________________________________
+    // Optimizing batch norm backprop caculation
+    //________________________________________________________________________________
+
+    auto h_preact_optimized = bn_gain*(h_prebn - h_prebn.mean(0, true))/torch::sqrt(h_prebn.var(0, /*unbiased=*/true, /*keepdim=*/true) + 1e-5) + bn_bias;
+    std::cout<<"Diff between batchnorm (torch) and manually calculated: "<<(h_preact - h_preact_optimized).abs().max().item<float>()<<std::endl;
+
+    // batch_norm (y) = bn_gain*(norm) + bn_bias, where norm = (x-x.mean)/[x.var(unbiased)]^0.5
+    // dy/d(norm) = bn_gain
+    // d(norm)/dx = 1/[x.var(unbiased)]^0.5
+    // d(norm)/d(x.mean) = -1/[x.var(unbiased)]^0.5
+    // d(x.mean)/d(xi) = 1/batch_size
+    // d(norm)/d(var) = -0.5*(x-x.mean)*(x.var(unbiased) + eps)^(-3/2)
+    // d(var)/d(xi) = 2*(x-x.mean)/(batch_size - 1) // for the unbiased variance
+
+    // ___________________FORMULA__________________________________
+    // So, dy/dx = dy/d(norm) * [d(norm)/dx + d(norm)/d(x.mean)*SIGMA[d(x.mean)/d(xi)] + d(norm)/d(var)*SIGMA[d(var)/d(xi)]]
+    
+    // ___________________TERM 1__________________________________
+    // First term, dy/d(norm) * d(norm)/dx = bn_gain * bn_var_inv. 
+    // So dL/dx = dL/dy * dy/dx = bn_gain * bn_var_inv * d_h_preact.
+
+    // ___________________TERM 2__________________________________
+    // dy/d(norm)*d(norm)/d(x.mean)*SIGMA[d(x.mean)/d(xi)] 
+    // = bn_gain *(-bn_var_inv)* SIGMA[ 1/ batch_size] => Terms outside SIGMA is of size (1, n_hidden)
+    // So these terms are constant. However, we need to consider loss term backprogaged from later layers.
+    // dL/dx = dL/dy * term 2 so far, where dL/dy = d_h_preact is of size (batch_size, n_hidden) 
+    // So, SIGMA[dL/dy * dy/d(norm) * d(norm)/d(x.mean)*d(x.mean)/d(xi)]
+    // = -bn_gain * bn_var_inv * d_h_preact.sum(dim=0) / batch_size
+
+    // ___________________TERM 3__________________________________
+    // dy/d(norm) * d(norm)/d(var)* SIGMA[d(var)/d(xi)]
+    // bn_raw = (x - x.mean)/[x.var(unbiased)]^0.5
+    // d(norm)/d(var) = -0.5 * bn_raw * bn_var_inv * [x.var(unbiased)]^-0.5
+    // d(var)/d(xi) = 2 * bn_raw * [x.var(unbiased)]^0.5 / (batch_size - 1)
+    // dL/dx = dL/dy * dy/d(norm) * d(norm)/d(var) * SIGMA[ d(var)/d(xi)]
+    // = d_h_preact * bn_gain *(-bn_raw * bn_var_inv) * SIGMA[bn_raw/(batch_size - 1)]
+    // Here, dL/dy term should individually contribute to all elements.
+    // So, term3 = bn_gain *(-bn_raw * bn_var_inv)/(batch_size - 1) * SIGMA[d_h_preact *bn_raw]
+    // = -bn_gain* bn_var_inv * bn_raw * (bn_raw * d_h_preact).sum(dim=0) /(batch_size -1)
+
+    // Adding altogether,
+    // dL/dx = bn_gain * bn_var_inv*(d_h_preact - d_h_preact.sum(dim=0) / batch_size - bn_raw * (bn_raw * d_h_preact).sum(dim=0) /(batch_size -1))
+
+    auto d_prebn_optimized = bn_gain*bn_var_inv*(d_h_preact - d_h_preact.sum(0)/batch_size - bn_raw*(d_h_preact*bn_raw).sum(0)/(batch_size-1));
+
+    d_prebn_optimized.set_requires_grad(true);
+    d_prebn_optimized.retain_grad();
+
+    cmp("prebn_optimized", d_prebn_optimized, h_prebn);
 
 }

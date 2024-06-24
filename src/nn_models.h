@@ -37,4 +37,4 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
 // @param context_win_size      Size of the context window.
 // @param num_names             Number of names to generate at the inference time.
 // @param batch_size            Size of the batch to be consumed at the training time.
-void mlp_model_with_custom_backprop(const std::string& data_path, const int context_win_size, int num_names, int batch_size=64);
+void custom_backprop_test(const std::string& data_path, const int context_win_size, int num_names, int batch_size=64);

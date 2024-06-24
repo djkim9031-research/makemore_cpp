@@ -187,6 +187,6 @@ inline void cmp(const std::string& s, const torch::Tensor& dt, const torch::Tens
     float maxdiff = (dt - t.grad()).abs().max().item<float>();
 
 
-    std::cout << std::setw(15) << s << " | exact: " << std::boolalpha << exact
+    std::cout << std::setw(25) << s << " | exact: " << std::boolalpha << exact
               << " | approximate: " << approximate << " | maxdiff: " << maxdiff << std::endl;
 }
