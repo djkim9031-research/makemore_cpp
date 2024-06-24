@@ -122,6 +122,57 @@ namespace{
         return generated_names;
     }
 
+    std::vector<std::string> nn_name_inference_fixed_model(const std::unordered_map<char, int>& stoi,
+                                                           const std::unordered_map<int, char>& itos,
+                                                           const int num_names,
+                                                           const int context_win_size,
+                                                           const int vocab_size,
+                                                           const std::vector<torch::Tensor*>& trained_params,
+                                                           const std::vector<torch::Tensor*>& bn_params,
+                                                           const float eps,
+                                                           const torch::Generator& gen){
+        std::vector<std::string> generated_names;
+        for(int n=0; n<num_names; ++n){
+            std::string name = "";
+            char curr_char = '.';
+
+            int idx = 0;
+            auto xs_tensor = torch::zeros({1, context_win_size}, torch::kInt64);
+            while(true){
+                // Shift elements to the right
+                auto temp_tensor = xs_tensor.slice(1, 1, context_win_size).clone();
+                xs_tensor.slice(1, 0, context_win_size-1) = temp_tensor;
+                // Set the last element to the new value.
+                xs_tensor[0][context_win_size-1] = stoi.at(curr_char);
+
+                auto xenc = torch::nn::functional::one_hot(xs_tensor, vocab_size).to(torch::kFloat32);
+                auto emb = torch::matmul(xenc, *trained_params[0]); 
+                auto out = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
+                for(size_t i=1; i<trained_params.size()-2; i+=4){
+                    auto pre_act = torch::matmul(out, *trained_params[i]) + (*trained_params[i+1]);
+
+                    auto bn_mean = *bn_params[2*(i/4)];
+                    auto bn_var = *bn_params[2*(i/4) +1];
+
+                    pre_act = ((*trained_params[i+2])*(pre_act - bn_mean) / torch::sqrt(bn_var + eps) ) + (*trained_params[i+3]);
+                    out = torch::tanh(pre_act);
+                }
+                out = torch::matmul(out, *trained_params[trained_params.size()-2]) + (*trained_params[trained_params.size()-1]);
+                auto probs = torch::nn::functional::softmax(out, 1);
+
+                idx = torch::multinomial(probs, /*num_samples=*/1, /*replacement=*/true, gen).item<int>();
+                curr_char = itos.at(idx);
+                curr_char = itos.at(idx);
+                if(idx == 0){
+                    break;
+                }
+                name += itos.at(idx);
+            }
+            generated_names.push_back(name);
+        }
+        return generated_names;
+    }
+
     // This estimates the bn_mean based on the entire training dataset.
     // It cumbersome and could potentially be computationally very expensive to call this
     // at each evaluation time during the training process.
@@ -391,6 +442,8 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     // will be 0.
     // Without proper initialization or batch normalization, saturation will be more pronounced.
     viz_tanh_activation_dist(mlp_layers); 
+
+    return;
 }
 
 
@@ -609,11 +662,7 @@ void custom_backprop_test(const std::string& data_path, const int context_win_si
     d_logits_optimized.index_put_({range_tensor, ys_tensor_batch}, torch::tensor({-1.0/batch_size})); 
     d_logits_optimized += torch::nn::functional::softmax(logits, /*dim=*/1)/batch_size;
 
-    d_logits_optimized.set_requires_grad(true);
-    d_logits_optimized.retain_grad();
-
     cmp("logits_optimized", d_logits_optimized, logits);
-
 
     //________________________________________________________________________________
     // Optimizing batch norm backprop caculation
@@ -661,9 +710,182 @@ void custom_backprop_test(const std::string& data_path, const int context_win_si
 
     auto d_prebn_optimized = bn_gain*bn_var_inv*(d_h_preact - d_h_preact.sum(0)/batch_size - bn_raw*(d_h_preact*bn_raw).sum(0)/(batch_size-1));
 
-    d_prebn_optimized.set_requires_grad(true);
-    d_prebn_optimized.retain_grad();
-
     cmp("prebn_optimized", d_prebn_optimized, h_prebn);
 
+    return;
+}
+
+
+void custom_backprop_model(const std::string& data_path, const int context_win_size, int num_names, int batch_size){
+
+    auto gen = at::detail::createCPUGenerator(42);
+    int embedding_space_dim = 10;
+    int vocab_size = 27;
+    int n_hidden = 200;
+
+    auto N = torch::ones({vocab_size, vocab_size}, torch::kInt32);
+
+    std::vector<std::string> words;
+    std::unordered_map<int, char> itos;
+    std::unordered_map<char, int> stoi;
+    tokenizer(data_path, N, words, itos, stoi);
+
+    //________________________________________________________________________________
+    // Data preparation and create training data
+    //________________________________________________________________________________
+    // Seed the random number generator
+    std::mt19937 rng(42); // 42 is the seed value
+
+    // Shuffle the words
+    std::shuffle(words.begin(), words.end(), rng);
+
+    // Calculate n1 and n2
+    int n1 = static_cast<int>(0.8 * words.size());
+    int n2 = static_cast<int>(0.9 * words.size());
+
+    std::vector<std::string> training_data(words.begin(), words.begin() + n1);
+    std::vector<std::string> validation_data(words.begin() + n1, words.begin() + n2);
+    std::vector<std::string> test_data(words.begin() + n2, words.end());
+
+    torch::Tensor xs_tensor, ys_tensor, xval_tensor, yval_tensor, xtest_tensor, ytest_tensor;
+
+    build_dataset(context_win_size, stoi, training_data, xs_tensor, ys_tensor);
+    build_dataset(context_win_size, stoi, validation_data, xval_tensor, yval_tensor);
+    build_dataset(context_win_size, stoi, test_data, xtest_tensor, ytest_tensor);
+
+    //________________________________________________________________________________
+    // Definition of trainable parameters
+    //________________________________________________________________________________
+
+    auto C = torch::randn({vocab_size, embedding_space_dim}, gen);
+    auto W1 = torch::randn({embedding_space_dim*context_win_size, n_hidden}, gen)*5/(3*std::sqrt(embedding_space_dim*context_win_size));
+    auto b1 = torch::randn(n_hidden, gen)*0.1;
+    auto W2 = torch::randn({n_hidden, vocab_size}, gen)*0.1;
+    auto b2 = torch::randn(vocab_size, gen)*0.1;
+
+    auto bn_gain = torch::randn({1, n_hidden})*0.1 + 1.0;
+    auto bn_bias = torch::rand({1, n_hidden})*0.1;
+
+    auto bn_running_mean = torch::zeros({1, n_hidden});
+    auto bn_running_var = torch::ones({1, n_hidden});
+    float momentum = 0.1;
+    float eps = 1e-5;
+
+    std::vector<torch::Tensor*> params = {&C, &W1, &b1, &bn_gain, &bn_bias, &W2, &b2};
+    std::vector<torch::Tensor*> bn_params = {&bn_running_mean, &bn_running_var};
+
+    //________________________________________________________________________________
+    // Training
+    //________________________________________________________________________________
+
+    // Prior to training, generated name:
+    std::cout<<"Generated name(s) prior to training: ";
+    std::vector<std::string> gen_names = nn_name_inference_fixed_model(stoi, itos, num_names, context_win_size, vocab_size, params, bn_params, eps, gen);
+    for(int n=0; n<num_names; ++n){
+        std::cout<<gen_names[n]<<"   ";
+    }
+    std::cout<<"\n";
+    std::cout<<"________________________________________________________"<<std::endl;
+
+    int iter = 0;
+    while(true){
+
+        // Mini batch
+        auto idx = torch::randint(0, xs_tensor.size(0), {batch_size}, torch::kInt64); 
+        auto xs_tensor_batch = xs_tensor.index_select(0, idx);
+        auto ys_tensor_batch = ys_tensor.index_select(0, idx);
+        auto out = torch::nn::functional::one_hot(xs_tensor_batch, vocab_size).to(torch::kFloat32);
+
+        //________________________________________________________________________________
+        // Forward pass
+        //________________________________________________________________________________
+        // embedding layer
+        auto xenc = torch::nn::functional::one_hot(xs_tensor_batch, vocab_size).to(torch::kFloat32);
+        auto emb = torch::matmul(xenc, C);
+        auto emb_flattened = emb.view({emb.sizes()[0], emb.sizes()[1] * emb.sizes()[2]});
+
+        // Linear layer 1
+        auto h_prebn = torch::matmul(emb_flattened, W1) + b1; // batch, n_hidden
+
+        // Batchnorm layer
+        auto bn_mean = h_prebn.mean(0, true);    // 1, n_hidden
+        auto bn_var = h_prebn.var(0, /*unbiased=*/true, /*keepdim=*/true); // 1, n_hidden
+        auto bn_var_inv = torch::pow(bn_var + eps, -0.5); // 1, n_hidden
+        auto bn_raw = (h_prebn - bn_mean)*bn_var_inv; // batch_size, n_hidden
+        auto h_preact = bn_gain*bn_raw + bn_bias; //batch_size, n_hidden
+
+        // running mean, var calculation
+        bn_running_mean = (1 - momentum) * bn_running_mean + momentum * bn_mean;
+        bn_running_var = (1 - momentum) * bn_running_var + momentum * bn_var;
+
+        // Non-linearity
+        auto h = torch::tanh(h_preact); // batch_size, n_hidden
+
+        // Linear layer 2
+        auto logits = torch::matmul(h, W2) + b2; // batch_size, vocab_size
+
+        // Cross-entropy loss
+        auto loss = torch::nn::functional::cross_entropy(logits, ys_tensor_batch);
+
+        if(iter%10000==0){
+            //calibrate_batch_norm(xs_tensor, context_win_size, vocab_size, params, bn_params);
+            std::cout<<"[Iteration "<<iter<<", Training loss = "<<loss.item<float>()<<"]"<<std::endl;
+            std::cout<<"[Inference - MLP custom backprop model] Generated name(s): ";
+            gen_names.clear();
+            gen_names = nn_name_inference_fixed_model(stoi, itos, num_names, context_win_size, vocab_size, params, bn_params, eps, gen);
+            for(int n=0; n<num_names; ++n){
+                std::cout<<gen_names[n]<<"   ";
+            }
+            std::cout<<"\n";
+            std::cout<<"________________________________________________________"<<std::endl;
+        }
+        iter += 1;
+        if(iter>200000){
+            break;
+        }
+
+        //________________________________________________________________________________
+        // Backward pass
+        //________________________________________________________________________________
+
+        // logits
+        auto range_tensor = torch::arange(batch_size, torch::kInt64);
+        auto d_logits = torch::zeros_like(logits);
+        d_logits.index_put_({range_tensor, ys_tensor_batch}, torch::tensor({-1.0/batch_size})); 
+        d_logits += torch::nn::functional::softmax(logits, /*dim=*/1)/batch_size;
+
+        // layer 2
+        auto d_h = torch::matmul(d_logits, W2.transpose(0, 1)); //(batch_size, n_hidden) = (batch_size, vocab_size)*(n_hidden, vocab_size).T
+        auto d_W2 = torch::matmul(h.transpose(0, 1), d_logits);
+        auto d_b2 = d_logits.sum(0);
+
+        // tanh nonlinearity
+        auto d_h_preact = (1.0 - torch::pow(h, 2))*d_h;
+
+        // batch norm
+        auto d_bn_gain = (bn_raw * d_h_preact).sum(0, true); //(1, n_hidden)
+        auto d_bn_bias = d_h_preact.sum(0, true);
+        auto d_h_prebn = bn_gain*bn_var_inv*(d_h_preact - d_h_preact.sum(0)/batch_size - bn_raw*(d_h_preact*bn_raw).sum(0)/(batch_size-1));
+
+        // layer 1
+        auto d_emb_flattened = torch::matmul(d_h_prebn, W1.transpose(0, 1));
+        auto d_W1 = torch::matmul(emb_flattened.transpose(0, 1), d_h_prebn);
+        auto d_b1 = d_h_prebn.sum(0);
+        auto d_emb = d_emb_flattened.view({emb.sizes()});
+    
+        // embedding layer
+        auto d_C = torch::matmul(xenc.transpose(1, 2), d_emb).sum(0);
+
+        std::vector<torch::Tensor*> param_grads = {&d_C, &d_W1, &d_b1, &d_bn_gain, &d_bn_bias, &d_W2, &d_b2};
+
+        //________________________________________________________________________________
+        // Parameter updates
+        //________________________________________________________________________________
+
+        float lr = (iter > 100000) ? 0.01 : 0.1;
+        for(size_t i=0; i<params.size(); ++i){
+            params[i]->data() -= lr*(*param_grads[i]);
+        }
+
+    }
 }
