@@ -69,7 +69,7 @@ namespace{
                      const int vocab_size,
                      const std::vector<std::unique_ptr<Layer>>& layers){
 
-        auto out = torch::nn::functional::one_hot(validation_data, vocab_size).to(torch::kFloat32);
+        auto out = validation_data;
         for(size_t i=0; i<layers.size(); ++i){
             layers[i]->eval();
             out = layers[i]->forward(out);
@@ -100,13 +100,12 @@ namespace{
                 // Set the last element to the new value.
                 xs_tensor[0][context_win_size-1] = stoi.at(curr_char);
 
-                auto out = torch::nn::functional::one_hot(xs_tensor, vocab_size).to(torch::kFloat32);
+                auto out = xs_tensor;
                 for(size_t i=0; i<layers.size(); ++i){
                     layers[i]->eval();
                     out = layers[i]->forward(out);
                 }
-                auto counts = out.exp();  // num_names, vocab_size
-                auto probs = counts / counts.sum(1, true);
+                auto probs = torch::nn::functional::softmax(out, 1);
 
                 idx = torch::multinomial(probs, /*num_samples=*/1, /*replacement=*/true, gen).item<int>();
                 curr_char = itos.at(idx);
@@ -330,7 +329,9 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     //________________________________________________________________________________
     // Layers definition
     //________________________________________________________________________________
-    auto embedding = std::make_unique<Linear>(vocab_size, embedding_space_dim, "embedding", gen, false);
+    auto embedding = std::make_unique<Embedding>(vocab_size, embedding_space_dim, "embedding", gen);
+    auto flatten = std::make_unique<Flatten>("flatten");
+
     auto ln1 = std::make_unique<Linear>(context_win_size*embedding_space_dim, n_hidden, "dense1", gen, false);
     auto bn1 = std::make_unique<BatchNorm1D>(n_hidden, "batch_norm1", 0.1);
     auto tanh1 = std::make_unique<TanhActivation>("tanh1");
@@ -347,6 +348,8 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
 
     std::vector<std::unique_ptr<Layer>> mlp_layers;
     mlp_layers.push_back(std::move(embedding));
+    mlp_layers.push_back(std::move(flatten));
+
     mlp_layers.push_back(std::move(ln1));
     mlp_layers.push_back(std::move(bn1));
     mlp_layers.push_back(std::move(tanh1));
@@ -387,15 +390,15 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
         auto idx = torch::randint(0, xs_tensor.size(0), {batch_size}, torch::kInt64); 
         auto xs_tensor_batch = xs_tensor.index_select(0, idx);
         auto ys_tensor_batch = ys_tensor.index_select(0, idx);
-        auto out = torch::nn::functional::one_hot(xs_tensor_batch, vocab_size).to(torch::kFloat32);
+        auto tensors = xs_tensor_batch;
 
         // Forward pass
         for(size_t i=0; i<mlp_layers.size(); ++i){
             mlp_layers[i]->train();
-            out = mlp_layers[i]->forward(out);
+            tensors = mlp_layers[i]->forward(tensors);
         }
 
-        auto loss = torch::nn::functional::cross_entropy(out, ys_tensor_batch);
+        auto loss = torch::nn::functional::cross_entropy(tensors, ys_tensor_batch);
 
         if(iter%10000==0){
             //calibrate_batch_norm(xs_tensor, context_win_size, vocab_size, params, bn_params);

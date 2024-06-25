@@ -13,9 +13,9 @@ int main() {
     //bigram_model("../data/names.txt", 10);
     //simple_neuron_model("../data/names.txt", 10);
 
-    //mlp_model("../data/names.txt", 5, 10);
+    mlp_model("../data/names.txt", 5, 10);
     //custom_backprop_test("../data/names.txt", 5, 10);
-    custom_backprop_model("../data/names.txt", 5, 10);
+    //custom_backprop_model("../data/names.txt", 5, 10);
 
     return 0;
 }

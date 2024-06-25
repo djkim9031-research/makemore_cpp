@@ -27,7 +27,6 @@ class Linear : public Layer{
             m_weights.set_requires_grad(true);
 
             m_layer_name = layer_name;
-            isTraining = true;
 
             if(bias){
                 m_bias = torch::zeros(fan_out);
@@ -43,9 +42,6 @@ class Linear : public Layer{
                 out += m_bias;
             }
 
-            if(m_layer_name == "embedding"){
-                out = out.view({out.sizes()[0], out.sizes()[1] * out.sizes()[2]});
-            }
             return out;
         }
 
@@ -201,5 +197,99 @@ class TanhActivation : public Layer{
     private:
         bool isTraining;
         std::string m_layer_name;
+
+};
+
+
+// Embedding layer
+class Embedding : public Layer{
+
+    public:
+        Embedding(int vocab_size, int embedding_dims, std::string layer_name, torch::Generator& gen)
+            : m_vocab_size(vocab_size), m_embedding_dims(embedding_dims), m_layer_name(layer_name){
+            m_weights = torch::randn({vocab_size, embedding_dims}, gen);
+            m_weights.set_requires_grad(true);
+        }
+
+        torch::Tensor forward(const torch::Tensor& x) override{
+            torch::Tensor out = torch::nn::functional::one_hot(x, m_vocab_size).to(torch::kFloat32);
+            return torch::matmul(out, m_weights);
+        }
+
+        std::vector<torch::Tensor*> parameters() override{
+            return {&m_weights};
+        }
+
+        std::string name() override{
+            return m_layer_name;
+        }
+
+        void train() override{
+            isTraining = true;
+        }
+
+        void eval() override{
+            isTraining = false;
+        }
+
+        torch::Tensor weights(){
+            return m_weights;
+        }
+
+        torch::Tensor bias(){
+            return torch::Tensor();
+        }
+
+    private:
+        int m_vocab_size;
+        int m_embedding_dims;
+        torch::Tensor m_weights;
+        std::string m_layer_name;
+        bool isTraining;
+
+};
+
+// Flatten layer
+class Flatten : public Layer{
+
+    public:
+        Flatten(std::string layer_name)
+         : m_layer_name(layer_name){}
+
+        torch::Tensor forward(const torch::Tensor& x) override{
+            return x.view({x.size(0), -1});
+        }
+
+        std::vector<torch::Tensor*> parameters() override{
+            return {};
+        }
+
+        std::string name() override{
+            return m_layer_name;
+        }
+
+        void train() override{
+            isTraining = true;
+        }
+
+        void eval() override{
+            isTraining = false;
+        }
+
+        torch::Tensor weights(){
+            return torch::Tensor();
+        }
+
+        torch::Tensor bias(){
+            return torch::Tensor();
+        }
+
+    private:
+        std::string m_layer_name;
+        bool isTraining;
+
+        
+
+    
 
 };
