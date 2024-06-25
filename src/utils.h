@@ -144,7 +144,7 @@ inline void viz_embedding_space(const torch::Tensor& embedding, const std::unord
 // Visualizer helper function to see the tanh layer's output distribution.
 // This is to check if the initialization of weights are valid, and not leading to value
 // saturation by the nonlinearity function, i.e., tanh.
-inline void viz_tanh_activation_dist(const std::vector<std::unique_ptr<Layer>>& layers) {
+inline void viz_tanh_activation_dist(const std::vector<std::shared_ptr<Layer>>& layers) {
     plt::figure_size(2000, 400);
 
     for (size_t i = 0; i < layers.size() - 1; ++i) { // Exclude the output layer

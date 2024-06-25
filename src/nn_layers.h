@@ -17,6 +17,41 @@ class Layer{
         virtual torch::Tensor bias() = 0; 
 };
 
+// Sequential layer builder
+class Sequential{
+    public:
+        Sequential(std::vector<std::shared_ptr<Layer>>&& layers)
+        : m_layers(layers){}
+
+        torch::Tensor operator()(const torch::Tensor& x, const bool isTraining){
+            
+            torch::Tensor out = x;
+            for(size_t i=0; i<m_layers.size(); ++i){
+                if(isTraining){
+                    m_layers[i]->train();
+                } else{
+                    m_layers[i]->eval();
+                }
+
+                out = m_layers[i]->forward(out);
+            }
+
+            return out;
+        }
+
+        std::vector<torch::Tensor*> parameters(){
+            std::vector<torch::Tensor*> params = {};
+            for(size_t i=0; i<m_layers.size(); ++i){
+                std::vector<torch::Tensor*> curr_layer_params = m_layers[i]->parameters();
+                params.insert(params.end(), curr_layer_params.begin(), curr_layer_params.end());
+            }
+
+            return params;
+        }
+
+        std::vector<std::shared_ptr<Layer>> m_layers;
+};
+
 
 // Linear layer
 class Linear : public Layer{
@@ -287,9 +322,4 @@ class Flatten : public Layer{
     private:
         std::string m_layer_name;
         bool isTraining;
-
-        
-
-    
-
 };
