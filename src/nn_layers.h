@@ -284,15 +284,29 @@ class Embedding : public Layer{
 
 };
 
-// Flatten layer
-class Flatten : public Layer{
+// Flatten Consecutive layer
+// This is a modification to the regular flatten layer.
+// As in the Wavenet implementation, `numConsecutiveElems` number of 
+// consecutive tokens are grouped together to propagate 2D tensors (excl. batch) 
+// to the next layers. With the linear layers, this can help form the recurrent tree-like structure.
+class FlattenConsecutive : public Layer{
 
     public:
-        Flatten(std::string layer_name)
-         : m_layer_name(layer_name){}
+        FlattenConsecutive(int numConsecutiveElems, std::string layer_name)
+         : m_numConsecutiveElems(numConsecutiveElems), m_layer_name(layer_name){}
 
         torch::Tensor forward(const torch::Tensor& x) override{
-            return x.view({x.size(0), -1});
+            int B = x.size(0);
+            int T = x.size(1); // current context window length
+            int C = x.size(2); // concatenated embedding dimension size
+
+            auto out = x.view({B, T/m_numConsecutiveElems, C*m_numConsecutiveElems});
+            int flattned_context_win_len = out.size(1);
+            if(flattned_context_win_len==1){
+                out = out.squeeze(/*dim=*/1);
+            }
+
+            return out;
         }
 
         std::vector<torch::Tensor*> parameters() override{
@@ -320,6 +334,7 @@ class Flatten : public Layer{
         }
 
     private:
+        int m_numConsecutiveElems;
         std::string m_layer_name;
         bool isTraining;
 };

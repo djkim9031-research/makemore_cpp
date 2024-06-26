@@ -284,7 +284,7 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     auto gen = at::detail::createCPUGenerator(42);
     int embedding_space_dim = 10;
     int vocab_size = 27;
-    int n_hidden = 200;
+    int n_hidden = 100;
 
     auto N = torch::ones({vocab_size, vocab_size}, torch::kInt32);
 
@@ -321,16 +321,18 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
     // Layers definition
     //________________________________________________________________________________
     auto embedding = std::make_shared<Embedding>(vocab_size, embedding_space_dim, "embedding", gen);
-    auto flatten = std::make_shared<Flatten>("flatten");
-
-    auto ln1 = std::make_shared<Linear>(context_win_size*embedding_space_dim, n_hidden, "dense1", gen, false);
+    
+    auto flatten1 = std::make_shared<FlattenConsecutive>(2, "flatten1");
+    auto ln1 = std::make_shared<Linear>(2*embedding_space_dim, n_hidden, "dense1", gen, false);
     auto bn1 = std::make_shared<BatchNorm1D>(n_hidden, "batch_norm1", 0.1);
     auto tanh1 = std::make_shared<TanhActivation>("tanh1");
 
-    auto ln2 = std::make_shared<Linear>(n_hidden, 2*n_hidden, "dense2", gen, false);
-    auto bn2 = std::make_shared<BatchNorm1D>(2*n_hidden, "batch_norm2", 0.1);
+    auto flatten2 = std::make_shared<FlattenConsecutive>(2, "flatten2");
+    auto ln2 = std::make_shared<Linear>(2*n_hidden, n_hidden, "dense2", gen, false);
+    auto bn2 = std::make_shared<BatchNorm1D>(n_hidden, "batch_norm2", 0.1);
     auto tanh2 = std::make_shared<TanhActivation>("tanh2");
 
+    auto flatten3 = std::make_shared<FlattenConsecutive>(2, "flatten3");
     auto ln3 = std::make_shared<Linear>(2*n_hidden, n_hidden, "dense3", gen, false);
     auto bn3 = std::make_shared<BatchNorm1D>(n_hidden, "batch_norm3", 0.1);
     auto tanh3 = std::make_shared<TanhActivation>("tanh3");
@@ -339,13 +341,15 @@ void mlp_model(const std::string& data_path, const int context_win_size, int num
 
     Sequential mlp_layers({
         embedding,
-        flatten,
+        flatten1,
         ln1,
         bn1,
         tanh1,
+        flatten2,
         ln2,
         bn2,
         tanh2,
+        flatten3,
         ln3,
         bn3,
         tanh3,
