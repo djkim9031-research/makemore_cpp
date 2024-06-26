@@ -136,8 +136,17 @@ class BatchNorm1D : public Layer{
         torch::Tensor forward(const torch::Tensor& x) override{
             torch::Tensor x_mean, x_var;
             if(isTraining){
-                x_mean = x.mean(0, /*keepdim=*/true);
-                x_var = x.var(0, /*unbiased=*/true, /*keepdim=*/true);
+                if(x.dim() == 2){
+                    x_mean = x.mean(0, /*keepdim=*/true);
+                    x_var = x.var(0, /*unbiased=*/true, /*keepdim=*/true);
+                } else if(x.dim() == 3){
+                    x_mean = x.mean(torch::IntArrayRef{0, 1}, /*keepdim=*/true);
+                    x_var = x.var(torch::IntArrayRef{0, 1}, /*unbiased=*/true, /*keepdim=*/true);
+                } else {
+                    std::cerr << "Unexpected tensor dimension: " << x.dim() << std::endl;
+                    return torch::Tensor();
+                }
+                
             } else{
                 x_mean = m_running_mean;
                 x_var = m_running_var;
